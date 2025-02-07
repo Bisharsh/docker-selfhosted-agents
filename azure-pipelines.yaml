@@ -1,0 +1,78 @@
+trigger:
+- none
+
+pool:
+  vmImage: 'ubuntu-20.04'
+
+resources:
+  repositories:
+    - repository: manifests
+      type: git
+      name: service-deployment-manifests
+
+variables:
+  ${{ if contains( variables['Build.SourceBranch'], 'refs/pull' ) }}: 
+    kanikoBranch: "&& git fetch origin +$(Build.SourceBranch):$(Build.SourceBranch) && git checkout --force $(Build.SourceBranch)"
+  ${{ if not( contains( variables['Build.SourceBranch'], 'refs/pull' ) ) }}: 
+    kanikoBranch: "$(Build.SourceVersion)"
+
+stages:
+- stage: Checkout
+  jobs:
+  - job: checkout
+    steps:
+    - checkout: self
+    - checkout: manifests
+
+- stage: Register_Agent
+  variables:
+  - group: ACR
+  dependsOn: Checkout
+  jobs:
+  - job: create_docker_agents
+    displayName: create docker agents
+    steps:
+    - task: Kubernetes@1
+      inputs:
+        connectionType: 'Kubernetes Service Connection'
+        kubernetesServiceEndpoint: 'docker-chat-dev'
+        command: 'login'
+    - script: |
+        echo $sourceVersion
+        commitHash=${sourceVersion:0:7}
+        echo $commitHash
+        echo "##vso[task.setvariable variable=commitHash]$commitHash"
+        sourceBranch=${BUILD_SOURCEBRANCH:11}
+        echo "##vso[task.setvariable variable=sourceBranch]$sourceBranch"
+        echo "##vso[task.setvariable variable=image-tag]$(Build.BuildId)"
+      env: { sourceVersion: $(Build.SourceVersion) }
+      displayName: Git Hash 7-digit
+
+    - template: services/kaniko-build-templates/docker-build-template.yml@manifests
+      parameters:
+        repo_name: 'azdo-agents' #specify repo where dockerfile is located in 'Github_Orgnisation/repository_name'
+        branch_name: '$(kanikoBranch)'     #specify what branch of above repo to look into
+        dockerfile: './docker-agents/Dockerfile'                #Dockerfile location in above repo
+        dockerfile_arguments: ''
+        build_id: '$(Build.BuildId)'            #takes build id of current build
+        destination_secret_name: 'docker-image-secret'
+        build_destination: 'acraifactory.azurecr.io/docker-agent:$(commitHash)-$(Build.BuildId)' #Jfrog location to store builds, note that builds are place under kaniko/kaniko-build folder(can change it, prefer repo name) and tagged with current BuidId
+
+    - script: |
+        echo "creating imagesecrets"
+        kubectl create secret docker-registry docker-registry-credentials "--docker-server=$(acr_server)" --docker-username=$(acr_username) --docker-password=$(acr_password)  -n docker-agents -o yaml --dry-run=true | kubectl apply -f -
+      displayName: Create Registry Credentials
+      
+    - task: qetza.replacetokens.replacetokens-task.replacetokens@3
+      displayName: Replace tokens in **/*
+      inputs:
+        rootDirectory: $(Pipeline.Workspace)/s/docker-agents/
+        targetFiles: '**/*'
+        keepToken: true
+        tokenPrefix: __
+        tokenSuffix: __  
+    - bash: |
+        kubectl apply -f ./agents/agent-deployment.yaml
+      displayName: 'create docker agent'
+
+      
