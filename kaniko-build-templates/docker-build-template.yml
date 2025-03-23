@@ -1,0 +1,119 @@
+#Pod Templated to be used by PR pipeline to build within the CLI of a dedicated pod.
+
+#Required parameters to execute this template
+parameters:
+  - name: org_name
+    default: "AI%20Toolkit"
+  - name: repo_name
+  - name: branch_name
+  - name: dockerfile
+  # keep this as it we can include context path
+  - name: dockerfile_arguments
+  - name: build_id
+  - name: build_destination
+  - name: destination_secret_name
+  - name: job_attempt_id
+    default: "$(System.JobAttempt)"
+  - name: namespace
+  # FM new parameters
+  # What buildId is the builder pod expecting
+  # TODO: Add a step in the pull-request-verification build pipeline to add the buildID to the ADO Library
+  # What buildId is the builder pod expecting
+  # TODO: Add a step in the pull-request-verification build pipeline to add the buildID to the ADO Library
+  - name: builder_version
+
+
+steps:
+  #Installs Kubectl, Relevent when agent does not have that installed already.
+  - task: KubectlInstaller@0
+    displayName: "Install latest kubectl if not present"
+    inputs:
+      kubectlVersion: "latest"
+
+  #Sets COntext to DEV AKS Cluster
+  - task: Kubernetes@1
+    inputs:
+      connectionType: "Kubernetes Service Connection"
+      kubernetesServiceEndpoint: "genAI-chat-dev"
+      command: "login"
+
+  #Logs Build Info
+  - task: Bash@3
+    displayName: "Print Build Information"
+    inputs:
+      targetType: "inline"
+      script: |
+        echo "ToolKit"
+        echo 'GIT Context              =  git://pwc-us-pt-innovationhub.visualstudio.com/DefaultCollection/${{parameters.org_name}}/_git/${{parameters.repo_name}}#refs/heads/${{parameters.branch_name}}'
+        echo 'Dockerfile In GIT Context=  ${{parameters.dockerfile}}'
+        echo 'Dockerfile Arguments     =  ${{parameters.dockerfile_arguments}}'
+        echo 'Build Destination        =  ${{parameters.build_destination}}'
+        echo 'System Job attempt       =  ${{parameters.job_attempt_id}}'
+        echo 'Namespace                =  ${{parameters.namespace}}'
+  # Submits pr builder request
+  - task: Bash@3
+    displayName: "Submit kaniko build request"
+    inputs:
+      targetType: "inline"
+      script: |
+        #Create a pod manifest to create the pr-builder pod
+        cat > pod.yaml <<EOF
+        apiVersion: v1
+        kind: Pod
+        metadata:
+          name: pr-builder-${{parameters.builder_version}}
+          namespace: ${{parameters.namespace}}
+        spec:
+          containers:
+          - name: pr-builder-${{parameters.builder_version}}
+            image: acraifactory.azurecr.io/pr-builder:48980
+            stdin: true
+            stdinOnce: true
+            # FM TODO: Parameterize the args to handle dotnet and npm commands.
+            args: ["--dockerfile=${{ parameters.dockerfile }}","--context=dir:///workspace/","--destination=${{ parameters.build_destination }}",${{ parameters.dockerfile_arguments }}]
+            volumeMounts:
+            - name: acr-secret
+              mountPath: /kaniko/.docker/
+            - name: build-context
+              mountPath: /workspace
+          initContainers:
+          - name: clone
+            image: alpine:3.7
+            command: ["/bin/sh","-c"]
+            args: ['apk add --no-cache git && git clone https://$(azdo-pat)@pwc-us-pt-innovationhub.visualstudio.com/DefaultCollection/${{parameters.org_name}}/_git/${{parameters.repo_name}} /workspace/ && cd /workspace && git checkout ${{parameters.branch_name}}']
+            volumeMounts:
+            - name: build-context
+              mountPath: /workspace
+          restartPolicy: Never
+          volumes:
+          - name: acr-secret
+            secret:
+              secretName: "${{parameters.destination_secret_name}}"
+              items:
+                - key: .dockerconfigjson
+                  path: config.json
+          - name: build-context
+            emptyDir: {}
+        EOF
+        cat pod.yaml
+        kubectl apply -f pod.yaml
+  #Monitor build status
+  #TODO: Fix this mess to tail logs. There might be some issues as I've noticed on --watch (pods) -f arguments that Rancher interrupts the connection after a time.
+  #Maybe retry logic, if statement to check if the status is still running, then rerun the command?
+  #Only issue there is average user would see that as a higher amount of logs.
+  - task: Bash@3
+    displayName: "Monitor build Progress"
+    inputs:
+      targetType: "inline"
+      script: |
+        # Monitor for Success or failure
+        while [[ $(kubectl get pods pr-builder-${{parameters.builder_version}} -n ${{parameters.namespace}} -o jsonpath='{..status.phase}') != "Succeeded" && $(kubectl get pods pr-builder-${{parameters.builder_version}} -n ${{parameters.namespace}} -o jsonpath='{..status.phase}') != "Failed" ]]; do echo "waiting for pod pr-builder-${{parameters.builder_version}}" && sleep 5; done
+        # Exit the script with error if build failed
+        if [ $(kubectl get pods pr-builder-${{parameters.builder_version}} -n ${{parameters.namespace}} -o jsonpath='{..status.phase}') == "Failed" ]; then
+            echo "*** PRINTING LOGS ***"
+            kubectl logs pr-builder-${{parameters.builder_version}} -n ${{parameters.namespace}}
+            echo "*** END LOGS ***"
+            exit 1;
+        fi
+        echo "Build Created and Pushed to the destination: ${{parameters.build_destination}}"
+        kubectl delete pod pr-builder-${{parameters.builder_version}} -n ${{parameters.namespace}}

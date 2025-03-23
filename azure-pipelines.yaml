@@ -22,7 +22,6 @@ stages:
   - job: checkout
     steps:
     - checkout: self
-    - checkout: manifests
 
 - stage: Register_Agent
   variables:
@@ -48,7 +47,7 @@ stages:
       env: { sourceVersion: $(Build.SourceVersion) }
       displayName: Git Hash 7-digit
 
-    - template: services/kaniko-build-templates/docker-build-template.yml@manifests
+    - template: services/kaniko-build-templates/docker-build-template.yml
       parameters:
         repo_name: 'azdo-agents' #specify repo where dockerfile is located in 'Github_Orgnisation/repository_name'
         branch_name: '$(kanikoBranch)'     #specify what branch of above repo to look into
@@ -56,7 +55,7 @@ stages:
         dockerfile_arguments: ''
         build_id: '$(Build.BuildId)'            #takes build id of current build
         destination_secret_name: 'docker-image-secret'
-        build_destination: 'acraifactory.azurecr.io/docker-agent:$(commitHash)-$(Build.BuildId)' #Jfrog location to store builds, note that builds are place under kaniko/kaniko-build folder(can change it, prefer repo name) and tagged with current BuidId
+        build_destination: 'dockeragent.azurecr.io/docker-agent:$(commitHash)-$(Build.BuildId)' #Jfrog location to store builds, note that builds are place under kaniko/kaniko-build folder(can change it, prefer repo name) and tagged with current BuidId
 
     - script: |
         echo "creating imagesecrets"
